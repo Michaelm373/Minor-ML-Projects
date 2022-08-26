@@ -1,0 +1,314 @@
+############################################################################
+####                     seting up the workspace                        ####
+############################################################################
+# install the required libraries
+!pip3 install torch
+!pip3 install torchvision
+
+# import the required libraries to the workspace
+import torch
+import numpy as np
+from torchvision import datasets, transforms
+from torch.utils.data.sampler import SubsetRandomSampler
+import torch.nn.functional as F
+import os
+import matplotlib.pyplot as plt
+from pylab import *
+import pandas as pd
+
+# downloading the data (25 test and 50 train images for each of the 50 landmarks)
+!aws s3 cp s3://michaelmanoukianlandmarks/landmark_images/test/ landmark_images/test/ --recursive
+!aws s3 cp s3://michaelmanoukianlandmarks/landmark_images/train/ landmark_images/train/ --recursive 
+
+# display one of the images to make sure the data downloaded correctly
+image = imread('landmark_images/train/16.Eiffel_Tower/640a59e7290ab2c2.jpg')
+imshow(image)
+
+
+
+###########################################################################
+####    creating the test_loader, train_loader, and valid_loader       ####
+###########################################################################
+#sets parameters
+num_workers = 0
+batch_size = 30
+valid_size = 0.2
+
+test_path = r'landmark_images/test/'
+train_path = r'landmark_images/train/'
+
+#converts data to vector of the appropriate size
+transform = transforms.Compose([transforms.Resize((400,400)),
+                                transforms.ToTensor()])
+
+#all the data
+test_data = datasets.ImageFolder(root=test_path, transform=transform)
+train_data = datasets.ImageFolder(root=train_path, transform=transform)
+
+#splits train and validation data 
+num_total = len(train_data)
+indices = list(range(num_total))
+np.random.shuffle(indices)
+split = int(np.floor(num_total * valid_size))
+train_idx, valid_idx = indices[split:], indices[:split]
+
+train_sampler = SubsetRandomSampler(train_idx)
+valid_sampler = SubsetRandomSampler(valid_idx)
+
+train_loader = torch.utils.data.DataLoader(train_data, batch_size=batch_size, 
+                                          sampler= train_sampler, num_workers=num_workers)
+valid_loader = torch.utils.data.DataLoader(train_data, batch_size=batch_size, 
+                                          sampler= valid_sampler, num_workers=num_workers)
+test_loader = torch.utils.data.DataLoader(test_data, batch_size=batch_size,
+                                          num_workers=num_workers)
+
+
+
+#####################################################################
+# the iamges are labelled with numbers alongside the name of the image.
+# this splits the names and numbers and re-organizes the data in the 
+# order they should be in for correct classification
+#####################################################################
+classes_pre = []
+for root, dirs, files in os.walk(test_path, topdown=False):
+    for name in dirs:
+        x = name.split('.')
+        classes_pre.append(x)
+
+n = 0
+classes = []
+for x in range(len(classes_pre)):
+    for i in classes_pre:
+        if int(i[0]) == n:
+            classes.append(i[1])
+            n += 1
+
+
+###################################################################
+# loads four images and their labels to make sure the data 
+# is setup correctly
+###################################################################
+dataiter = iter(valid_loader)
+images, labels = dataiter.next()
+images = images.numpy()
+
+fig = plt.figure(figsize=(25, 5))
+#.permute(0,2,3,1)
+for idx in np.arange(4):
+    ax = fig.add_subplot(1, 4, idx+1, xticks=[], yticks=[])
+    imshow(images[idx].T)
+    ax.set_title(classes[labels[idx]])
+    
+    
+
+#################################################################
+# importing a few pretrained models and printing the architechure
+# to see what would be most compatable with the data
+#################################################################
+from torchvision import models
+
+vgg16 = models.vgg16(pretrained=True)
+print(vgg16)
+
+resnet34 = models.resnet34(pretrained=True)
+print(resnet34)
+
+# after looking through some of the models on the torchvision.models website, I ended up choosing these 2 because they were used for 
+# similar image classification tasks and should have a convolutional layer that can extract the correct features. For my final model
+# I used vgg16 because the 16 layers would run quicker than the 34 and the extra accuracy would most likely not be necessary. If I was
+# using this model in a final product, I would train both models and compare the accuracy after a certain number of epochs
+
+
+
+###############################################################
+# freezing the weights of the convolutional layer but not the
+# fully connected ones so the relavent classes are the outputs
+###############################################################
+for param in vgg16.features.parameters():
+    param.requires_grad = False
+        
+#making sure the correct layers had the requires_grad set to false
+for name, param in resnet34.named_parameters():
+    if param.requires_grad == True:
+        print(name)
+        
+        
+        
+##############################################################
+# reset the new fully connected layers so the images are
+# correctly labelled
+##############################################################
+from collections import OrderedDict
+
+classifier = nn.Sequential(OrderedDict([
+    ('fc1', nn.Linear(25088, 4096)), ('relu', nn.ReLU()),
+    ('fc2', nn.Linear(4096, 1024)), ('relu', nn.ReLU()),
+    ('fc3', nn.Linear(1024, 50)), ('output', nn.LogSoftmax(dim=1))
+]))
+
+# set the classifier layer and print for validation
+vgg16.classifier = classifier
+print(vgg16)
+
+
+
+#############################################################
+#####               training the model                  #####
+#############################################################
+criterion = nn.NLLLoss()
+optimizer = optim.SGD(vgg16.classifier.parameters(), lr=0.001, momentum=0.5)
+epochs = 20
+
+#clears cache
+torch.cuda.empty_cache()
+
+#sets processing to gpu
+vgg16.cuda()
+
+#validation loss min for saving model
+valid_loss_min = 10000
+
+
+for e in range(epochs):
+    #tracking loss
+    train_loss = 0.0
+    valid_loss = 0.0
+    
+    #sets to training mode
+    vgg16.train()
+    for images, labels in train_loader:
+        #clears optimizer and moves data to cuda
+        optimizer.zero_grad()
+        images, labels = images.cuda(), labels.cuda()
+        
+        #runs through model
+        outputs = vgg16(images)
+        loss = criterion(outputs, labels)
+        loss.backward()
+        optimizer.step()
+        
+        #updates loss
+        train_loss += loss.item()*images.size(0)
+        
+        #clears cache
+        del outputs
+        torch.cuda.empty_cache()
+    
+    else:
+        #sets to evaluation mode
+        vgg16.eval()
+        for images, labels in valid_loader:
+            #switches to gpu
+            images, labels = images.cuda(), labels.cuda()
+        
+            #runs the validation set
+            with torch.no_grad():
+                outputs = vgg16(images)
+                loss = criterion(outputs, labels)
+        
+            #updates loss
+            valid_loss += loss.item()*images.size(0)
+            
+            #clears cache
+            del outputs
+            torch.cuda.empty_cache()
+            
+    #updates overall losses
+    training_loss = train_loss/len(train_loader.dataset)
+    validation_loss = valid_loss/len(valid_loader.dataset)
+    
+    #prints progress
+    print("Epoch: {} \tTraining Loss: {:.4f} \tValidation Loss: {:.4f}".format(
+        e+1, training_loss, validation_loss))
+    
+    #updates model
+    if valid_loss <= valid_loss_min:
+        torch.save(vgg16.state_dict(), 'landmark_detection_vgg16.pt')
+        valid_loss_min = valid_loss
+        print('Saving Model...')
+    
+print('Done!')
+
+
+#########################################################
+## evaluating using testing data
+#########################################################
+vgg16.eval()
+
+test_loss = 0
+for images, labels in test_loader:
+    images, labels = images.cuda(), labels.cuda()
+
+    with torch.no_grad():
+        output = vgg16(images)
+        loss = criterion(output, labels)
+        test_loss += loss.item()*images.size(0)
+        
+    testing_loss = test_loss/len(test_loader.dataset)
+    
+print(f"Testing Loss: {testing_loss}")
+
+
+##########################################################
+# load images with the predication and the correct label #
+# printed above the images. 5 images/predication/labels  #
+# per class                                              #
+##########################################################
+vgg16.eval()
+
+for images, labels in test_loader:
+    images, labels = images.cuda(), labels.cuda()
+
+    with torch.no_grad():
+        output = vgg16(images)
+        loss = criterion(output, labels)
+        
+     _ , guess_tensor = torch.topk(output, 1)
+    guess = np.squeeze(guess_tensor.cpu().numpy())
+    
+    images = images.cpu().numpy()
+    fig = plt.figure(figsize=(25, 5))
+    for idx in np.arange(5):
+        ax = fig.add_subplot(2, int(20/2), idx+1, xticks=[], yticks=[])
+        plt.imshow(np.transpose(images[idx]))
+        ax.set_title(str(classes[guess[idx]])+"\n"+str(classes[labels[idx]]))
+        
+        
+###########################################################
+# creates a dictionary with the location of each landmark
+# and a function to return the location of a given image.
+# This is to emulate geotagging in applications like
+# Intagram and Facebook
+###########################################################
+# a dictionary with the outputs of the network as the keys and locations as the values
+locations = {'Haleakala_National_Park': 'Haleakala National Park, Hawaii', 'Mount_Rainier_National_Park':'Mount Rainier National Park, Washington', 
+             'Ljubljana_Castle': 'Ljubljana Castle, Slovenia', 'Dead_Sea':'Dead Sea, Jordan Rift Valley', 'Wroclaws_Dwarves': 'Dwarves of Wroclaws, Wroclaw', 
+             'London_Olympic_Stadium': 'London Olympic Stadium, London', 'Niagara_Falls': 'Niagara Falls, New York', 'Stonehenge':'Stonehenges, Salisbury Plain', 
+             'Grand_Canyon': 'Grand Canyon, Arizona', 'Golden_Gate_Bridge':'Golden Gate, San Fransisco', 'Edinburgh_Castle': 'Edinburgh, Scotland', 
+             'Mount_Rushmore_National_Memorial': 'Mount Rushmore, South Dakota', 'Kantanagar_Temple':'Katanagar Temple, Sri Lanka', 
+             'Yellowstone_National_Park':'Yellowstone National Park, Wyoming', 'Terminal_Tower':'Cleveland, Ohio', 'Central_Park': 'Central Park, New York', 
+             'Eiffel_Tower': 'Eiffel Tower, Paris', 'Changdeokgung': 'Seoul, South Korea', 'Delicate_Arch': 'Delicate Arch, Utah', 'Vienna_City_Hall': 'Vienna City Hall, Vienna', 
+             'Matterhorn':'Switzerland', 'Taj_Mahal':'Taj Mahal, Agra', 'Moscow_Raceway': 'Moscow Raceway, Moscow', 'Externsteine':'Meinburg, Germany', 'Soreq_Cave': 'Bet Shemesh, Israel', 
+             'Banff_National_Park':'Banff National Park, Alberta', 'Pont_du_Gard':'Pont du Gard, France', 'Seattle_Japanese_Garden':'Seattle Japanese Park, Seattle', 
+             'Sydney_Harbour_Bridge':'Sydney Harbour Bridge, Sydney', 'Petronas_Towers':'Kuala Lampur, Malaysia', 'Brooklyn_Bridge':'Brooklyn, New York', 
+             'Washington_Monument': 'Washington Monument, Washington', 'Hanging_Temple':'Hanging Temple, China', 'Sydney_Opera_House': 'Sydney Australia', 
+             'Great_Barrier_Reef':'Great Barrier Reef, Australia', 'Monumento_a_la_Revolucion':'Plaza de la Republica, Mexico City', 'Badlands_National_Park':'Badlands National Park, South Dakota', 
+             'Atomium':'Atomium, Belgium', 'Forth_Bridge': 'Forth Bridge, Firth of Forth', 'Gateway_of_India':'Gateway of India, Mumbai', 'Stockholm_City_Hall':'Stockholm, Sweden', 
+             'Machu_Picchu':'Machu Pichu, Peru', 'Death_Valley_National_Park':'Death Valley, California', 'Gullfoss_Falls':'Gullfoss Falls, Iceland', 
+             'Trevi_Fountain':'Trevi Fountain, Rome', 'Temple_of_Heaven':'Temple of Heaven, Dongcheng', 'Great_Wall_of_China':'Great Wall of China, China', 
+             'Prague_Astronomical_Clock':'Prague, Chezch Republic', 'Whitby_Abbey':'Whitby Abbey, Yorkshire', 'Temple_of_Olympian_Zeus': 'Temple of Olympian Zeus, Athens'}
+             
+def location_finder(x):
+    return locations[classes[x]]
+    
+# the batch size was changed to 1
+dataiter = iter(valid_loader)
+images, labels = dataiter.next()
+
+with torch.no_grad():
+        output = vgg16(images)
+        
+_ , guess_tensor = torch.topk(output, 1)
+guess = np.squeeze(guess_tensor.cpu().numpy())
+
+location_finder(guess)
