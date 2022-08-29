@@ -113,10 +113,13 @@ print(vgg16)
 resnet34 = models.resnet34(pretrained=True)
 print(resnet34)
 
-# after looking through some of the models on the torchvision.models website, I ended up choosing these 2 because they were used for 
-# similar image classification tasks and should have a convolutional layer that can extract the correct features. For my final model
-# I used vgg16 because the 16 layers would run quicker than the 34 and the extra accuracy would most likely not be necessary. If I was
-# using this model in a final product, I would train both models and compare the accuracy after a certain number of epochs
+# after looking through some of the models on the torchvision.models website, I ended up choosing vgg16.
+# I came to this conclusion after reading these articles:
+# 
+# 1)   Classification of Tobacco Leaf Pests Using VGG16 Transfer Learning
+# 2)   Transfer learning using VGG-16 with Deep Convolutional Neural Network for Classifying Images
+# 3)   UNet-VGG16 with transfer learning for MRI-based brain tumor segmentation
+# 4)   Convolution Neural Network based Transfer Learning for Classification of Flowers
 
 
 
